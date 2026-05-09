@@ -38,6 +38,7 @@ GameOps 不控制的是：
 - 实名/未成年/当日游戏时长字段模拟。
 - 运营配置：公告、活动开关、登录维护、排位维护。
 - `GET /api/public/ops-state` 给网关或客户端读取当前运营状态。
+- `GET /api/public/players/{player_id}/state` 给网关读取玩家封禁状态。
 - 奖励邮件发放、查询、领取，重复领取不会重复加金币。
 - CDK 批次、单码查询、兑换，重复兑换会被阻止。
 - 最小数据事件上报。
@@ -77,6 +78,19 @@ $env:GAMEOPS_ADDR = "127.0.0.1:18090"
 go run ./cmd/server
 ```
 
+默认使用内存仓库，适合本地 demo 和 CI。如果需要启用 MySQL：
+
+```powershell
+$env:GAMEOPS_MYSQL_DSN = "gameops:<password>@tcp(127.0.0.1:3306)/gameops?parseTime=true&charset=utf8mb4&loc=Local"
+go run ./cmd/server
+```
+
+MySQL 表结构见：
+
+```text
+internal/gameops/mysql_schema.sql
+```
+
 默认管理员：
 
 ```text
@@ -99,6 +113,7 @@ password: admin_demo
 ## 文档
 
 - [API 文档](docs/api.md)
+- [存储设计](docs/storage.md)
 - [验证指南](docs/verification.md)
 - [项目方案书](GameOps_Proposal.md)
 - [技术报告](GameOps_Technical_Report.md)

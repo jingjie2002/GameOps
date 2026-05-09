@@ -11,8 +11,11 @@ type Config struct {
 	AdminPassword    string
 	OperatorUser     string
 	OperatorPassword string
+	AuditorUser      string
+	AuditorPassword  string
 	TokenSigningKey  string
 	CoreRankHTTP     string
+	MySQLDSN         string
 }
 
 func ConfigFromEnv() Config {
@@ -22,8 +25,11 @@ func ConfigFromEnv() Config {
 		AdminPassword:    getenv("GAMEOPS_ADMIN_PASSWORD", "admin_demo"),
 		OperatorUser:     getenv("GAMEOPS_OPERATOR_USER", "operator"),
 		OperatorPassword: getenv("GAMEOPS_OPERATOR_PASSWORD", "operator_demo"),
+		AuditorUser:      getenv("GAMEOPS_AUDITOR_USER", "auditor"),
+		AuditorPassword:  getenv("GAMEOPS_AUDITOR_PASSWORD", "auditor_demo"),
 		TokenSigningKey:  getenv("GAMEOPS_TOKEN_SIGNING_KEY", "gameops-dev-signing-key"),
 		CoreRankHTTP:     trimRightSlash(getenv("CORE_RANK_HTTP", "http://127.0.0.1:8081")),
+		MySQLDSN:         getenv("GAMEOPS_MYSQL_DSN", ""),
 	}
 }
 

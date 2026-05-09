@@ -43,19 +43,9 @@ func NewMemoryStore() *MemoryStore {
 		redemptions: make(map[string]*CDKRedemption),
 		configs:     make(map[string]*OpsConfig),
 	}
-	for key, value := range map[string]string{
-		"announcement":       "SS25 season is live",
-		"event_enabled":      "true",
-		"login_maintenance":  "false",
-		"ranked_maintenance": "false",
-	} {
-		store.configs[key] = &OpsConfig{
-			Key:         key,
-			Value:       value,
-			Description: "demo ops config",
-			UpdatedBy:   "system",
-			UpdatedAt:   now,
-		}
+	for _, cfg := range defaultOpsConfigs(now) {
+		copyCfg := cfg
+		store.configs[cfg.Key] = &copyCfg
 	}
 	return store
 }
@@ -388,12 +378,15 @@ func (s *MemoryStore) AddEvent(eventType, playerID string, payload map[string]an
 	return &copyEvent, nil
 }
 
-func (s *MemoryStore) ListAudits() []AuditLog {
+func (s *MemoryStore) ListAudits(filter AuditFilter) []AuditLog {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	audits := make([]AuditLog, 0, len(s.audits))
 	for _, audit := range s.audits {
+		if !auditMatchesFilter(*audit, filter) {
+			continue
+		}
 		audits = append(audits, *audit)
 	}
 	return audits
@@ -442,4 +435,35 @@ func marshalCompact(value any) string {
 		return "{}"
 	}
 	return string(data)
+}
+
+func auditMatchesFilter(audit AuditLog, filter AuditFilter) bool {
+	if filter.AdminID != "" && audit.AdminID != filter.AdminID {
+		return false
+	}
+	if filter.Action != "" && audit.Action != filter.Action {
+		return false
+	}
+	if filter.TargetType != "" && audit.TargetType != filter.TargetType {
+		return false
+	}
+	if filter.TargetID != "" && audit.TargetID != filter.TargetID {
+		return false
+	}
+	if filter.FromMS > 0 && audit.CreatedAt < filter.FromMS {
+		return false
+	}
+	if filter.ToMS > 0 && audit.CreatedAt > filter.ToMS {
+		return false
+	}
+	return true
+}
+
+func defaultOpsConfigs(now int64) []OpsConfig {
+	return []OpsConfig{
+		{Key: "announcement", Value: "SS25 season is live", Description: "demo ops config", UpdatedBy: "system", UpdatedAt: now},
+		{Key: "event_enabled", Value: "true", Description: "demo ops config", UpdatedBy: "system", UpdatedAt: now},
+		{Key: "login_maintenance", Value: "false", Description: "demo ops config", UpdatedBy: "system", UpdatedAt: now},
+		{Key: "ranked_maintenance", Value: "false", Description: "demo ops config", UpdatedBy: "system", UpdatedAt: now},
+	}
 }

@@ -13,7 +13,15 @@ import (
 
 func main() {
 	cfg := gameops.ConfigFromEnv()
-	store := gameops.NewMemoryStore()
+	var store gameops.Store = gameops.NewMemoryStore()
+	if cfg.MySQLDSN != "" {
+		mysqlStore, err := gameops.NewMySQLStore(cfg.MySQLDSN)
+		if err != nil {
+			log.Fatalf("[GameOps] MySQL store init failed: %v", err)
+		}
+		store = mysqlStore
+		log.Printf("[GameOps] using MySQL store")
+	}
 	server := gameops.NewServer(cfg, store)
 
 	httpServer := &http.Server{

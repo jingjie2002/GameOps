@@ -11,12 +11,12 @@ import (
 
 type Server struct {
 	cfg      Config
-	store    *MemoryStore
+	store    Store
 	metrics  *Metrics
 	corerank CoreRankClient
 }
 
-func NewServer(cfg Config, store *MemoryStore) *Server {
+func NewServer(cfg Config, store Store) *Server {
 	return &Server{
 		cfg:      cfg,
 		store:    store,
@@ -31,6 +31,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /metrics", s.metrics)
 	mux.HandleFunc("POST /api/admin/login", s.handleLogin)
 	mux.HandleFunc("GET /api/public/ops-state", s.handleOpsState)
+	mux.HandleFunc("GET /api/public/players/{player_id}/state", s.handlePublicPlayerState)
 	mux.HandleFunc("POST /api/players/{player_id}/mails/{mail_id}/claim", s.handleClaimMail)
 	mux.HandleFunc("POST /api/cdk/{code}/redeem", s.handleRedeemCDK)
 	mux.HandleFunc("POST /api/events", s.handleEvent)
@@ -109,6 +110,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		role = "admin"
 	case req.Username == s.cfg.OperatorUser && req.Password == s.cfg.OperatorPassword:
 		role = "operator"
+	case req.Username == s.cfg.AuditorUser && req.Password == s.cfg.AuditorPassword:
+		role = "auditor"
 	default:
 		s.writeError(w, http.StatusUnauthorized, ErrUnauthorized)
 		return
@@ -124,6 +127,9 @@ func (s *Server) handleMe(w http.ResponseWriter, _ *http.Request, principal Prin
 }
 
 func (s *Server) handleSeedPlayers(w http.ResponseWriter, r *http.Request, principal Principal) {
+	if !s.requireRole(w, principal, "admin") {
+		return
+	}
 	players := s.store.SeedPlayers(principal.UserID, requestID(r), clientIP(r))
 	s.metrics.auditWrites.Add(1)
 	s.writeJSON(w, http.StatusCreated, players)
@@ -143,6 +149,9 @@ func (s *Server) handleGetPlayer(w http.ResponseWriter, r *http.Request, _ Princ
 }
 
 func (s *Server) handleBanPlayer(w http.ResponseWriter, r *http.Request, principal Principal) {
+	if !s.requireRole(w, principal, "admin") {
+		return
+	}
 	var req struct {
 		Reason        string `json:"reason"`
 		BannedSeconds int64  `json:"banned_seconds"`
@@ -167,6 +176,9 @@ func (s *Server) handleBanPlayer(w http.ResponseWriter, r *http.Request, princip
 }
 
 func (s *Server) handleUnbanPlayer(w http.ResponseWriter, r *http.Request, principal Principal) {
+	if !s.requireRole(w, principal, "admin") {
+		return
+	}
 	player, err := s.store.UnbanPlayer(r.PathValue("player_id"), principal.UserID, requestID(r), clientIP(r))
 	if err != nil {
 		s.writeDomainError(w, err)
@@ -181,6 +193,9 @@ func (s *Server) handleListConfigs(w http.ResponseWriter, _ *http.Request, _ Pri
 }
 
 func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request, principal Principal) {
+	if !s.requireRole(w, principal, "admin") {
+		return
+	}
 	var req struct {
 		Value       string `json:"config_value"`
 		Description string `json:"description"`
@@ -197,7 +212,24 @@ func (s *Server) handleOpsState(w http.ResponseWriter, _ *http.Request) {
 	s.writeJSON(w, http.StatusOK, s.store.OpsState())
 }
 
+func (s *Server) handlePublicPlayerState(w http.ResponseWriter, r *http.Request) {
+	player, err := s.store.GetPlayer(r.PathValue("player_id"))
+	if err != nil {
+		s.writeDomainError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"player_id":    player.PlayerID,
+		"status":       player.Status,
+		"ban_reason":   player.BanReason,
+		"banned_until": player.BannedUntil,
+	})
+}
+
 func (s *Server) handleCreateMail(w http.ResponseWriter, r *http.Request, principal Principal) {
+	if !s.requireRole(w, principal, "admin", "operator") {
+		return
+	}
 	var req struct {
 		PlayerID string   `json:"player_id"`
 		Title    string   `json:"title"`
@@ -242,6 +274,9 @@ func (s *Server) handleClaimMail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateCDKBatch(w http.ResponseWriter, r *http.Request, principal Principal) {
+	if !s.requireRole(w, principal, "admin", "operator") {
+		return
+	}
 	var req struct {
 		Name           string   `json:"name"`
 		Gold           int64    `json:"gold"`
@@ -314,8 +349,11 @@ func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusCreated, event)
 }
 
-func (s *Server) handleAuditLogs(w http.ResponseWriter, _ *http.Request, _ Principal) {
-	s.writeJSON(w, http.StatusOK, s.store.ListAudits())
+func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request, principal Principal) {
+	if !s.requireRole(w, principal, "admin", "auditor") {
+		return
+	}
+	s.writeJSON(w, http.StatusOK, s.store.ListAudits(parseAuditFilter(r)))
 }
 
 func (s *Server) handleCoreRankHealth(w http.ResponseWriter, r *http.Request, _ Principal) {
@@ -390,4 +428,31 @@ func clientIP(r *http.Request) string {
 
 func requestID(r *http.Request) string {
 	return requestIDFromContext(r.Context())
+}
+
+func (s *Server) requireRole(w http.ResponseWriter, principal Principal, roles ...string) bool {
+	for _, role := range roles {
+		if principal.Role == role {
+			return true
+		}
+	}
+	s.writeError(w, http.StatusForbidden, ErrUnauthorized)
+	return false
+}
+
+func parseAuditFilter(r *http.Request) AuditFilter {
+	query := r.URL.Query()
+	filter := AuditFilter{
+		AdminID:    query.Get("admin_id"),
+		Action:     query.Get("action"),
+		TargetType: query.Get("target_type"),
+		TargetID:   query.Get("target_id"),
+	}
+	if value := query.Get("from_ms"); value != "" {
+		filter.FromMS, _ = strconvParseInt(value)
+	}
+	if value := query.Get("to_ms"); value != "" {
+		filter.ToMS, _ = strconvParseInt(value)
+	}
+	return filter
 }

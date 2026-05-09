@@ -48,12 +48,19 @@ POST /api/players/{player_id}/unban
 GET /api/ops-configs
 PUT /api/ops-configs/{config_key}
 GET /api/public/ops-state
+GET /api/public/players/{player_id}/state
 ```
 
 配置请求：
 
 ```json
 {"config_value":"true","description":"ranked queue closed for maintenance"}
+```
+
+玩家公开状态仅返回网关需要的封禁字段：
+
+```json
+{"player_id":"player_1001","status":"banned","ban_reason":"abuse_report","banned_until":1770000000000}
 ```
 
 ## 邮件奖励
@@ -108,7 +115,7 @@ POST /api/cdk/{code}/redeem
 
 ```http
 POST /api/events
-GET  /api/audit-logs
+GET  /api/audit-logs?admin_id=admin&action=player.ban&target_type=player&target_id=player_1003
 ```
 
 事件示例：
