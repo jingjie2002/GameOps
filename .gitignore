@@ -1,0 +1,6 @@
+.gocache/
+.gomodcache/
+tmp/
+__pycache__/
+*.pyc
+*.exe
