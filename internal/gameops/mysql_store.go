@@ -52,7 +52,7 @@ ON DUPLICATE KEY UPDATE config_key=config_key`,
 	return nil
 }
 
-func (s *MySQLStore) SeedPlayers(adminID, requestID, clientIP string) []Player {
+func (s *MySQLStore) SeedPlayers(meta AuditMeta) []Player {
 	seed := []Player{
 		{PlayerID: "player_1001", Nickname: "SausageAce", Level: 18, Gold: 1000, Status: "normal", RealNameVerified: true, Minor: false, DailyPlaySeconds: 3600},
 		{PlayerID: "player_1002", Nickname: "UlaHunter", Level: 12, Gold: 800, Status: "normal", RealNameVerified: true, Minor: true, DailyPlaySeconds: 1200},
@@ -73,7 +73,7 @@ ON DUPLICATE KEY UPDATE nickname=VALUES(nickname),level=VALUES(level),gold=VALUE
 			seed[i].PlayerID, seed[i].Nickname, seed[i].Level, seed[i].Gold, seed[i].Status, seed[i].BanReason, seed[i].BannedUntil,
 			seed[i].RealNameVerified, seed[i].Minor, seed[i].DailyPlaySeconds, seed[i].CreatedAt, seed[i].UpdatedAt)
 	}
-	s.appendAuditTx(tx, adminID, "players.seed", "players", "demo", "", marshalCompact(seed), requestID, clientIP)
+	s.appendAuditTx(tx, meta.AdminID, "players.seed", "players", "demo", "", marshalCompact(seed), meta)
 	_ = tx.Commit()
 	return seed
 }
@@ -111,7 +111,7 @@ FROM players WHERE player_id=?`, playerID)
 	return &player, nil
 }
 
-func (s *MySQLStore) BanPlayer(playerID, reason string, until int64, adminID, requestID, clientIP string) (*Player, error) {
+func (s *MySQLStore) BanPlayer(playerID, reason string, until int64, meta AuditMeta) (*Player, error) {
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return nil, err
@@ -130,15 +130,15 @@ func (s *MySQLStore) BanPlayer(playerID, reason string, until int64, adminID, re
 		return nil, err
 	}
 	_, _ = tx.Exec(`INSERT INTO player_status_logs (id,player_id,status,reason,banned_until_ms,created_by,created_at_ms) VALUES (?,?,?,?,?,?,?)`,
-		newStoreID("status"), playerID, "banned", reason, until, adminID, now)
-	s.appendAuditTx(tx, adminID, "player.ban", "player", playerID, marshalCompact(before), marshalCompact(after), requestID, clientIP)
+		newStoreID("status"), playerID, "banned", reason, until, meta.AdminID, now)
+	s.appendAuditTx(tx, meta.AdminID, "player.ban", "player", playerID, marshalCompact(before), marshalCompact(after), meta)
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return after, nil
 }
 
-func (s *MySQLStore) UnbanPlayer(playerID, adminID, requestID, clientIP string) (*Player, error) {
+func (s *MySQLStore) UnbanPlayer(playerID string, meta AuditMeta) (*Player, error) {
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return nil, err
@@ -157,8 +157,8 @@ func (s *MySQLStore) UnbanPlayer(playerID, adminID, requestID, clientIP string) 
 		return nil, err
 	}
 	_, _ = tx.Exec(`INSERT INTO player_status_logs (id,player_id,status,reason,banned_until_ms,created_by,created_at_ms) VALUES (?,?,?,?,?,?,?)`,
-		newStoreID("status"), playerID, "normal", "", 0, adminID, now)
-	s.appendAuditTx(tx, adminID, "player.unban", "player", playerID, marshalCompact(before), marshalCompact(after), requestID, clientIP)
+		newStoreID("status"), playerID, "normal", "", 0, meta.AdminID, now)
+	s.appendAuditTx(tx, meta.AdminID, "player.unban", "player", playerID, marshalCompact(before), marshalCompact(after), meta)
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -181,7 +181,7 @@ func (s *MySQLStore) ListConfigs() []OpsConfig {
 	return configs
 }
 
-func (s *MySQLStore) UpdateConfig(key, value, description, adminID, requestID, clientIP string) OpsConfig {
+func (s *MySQLStore) UpdateConfig(key, value, description string, meta AuditMeta) OpsConfig {
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return OpsConfig{}
@@ -191,13 +191,13 @@ func (s *MySQLStore) UpdateConfig(key, value, description, adminID, requestID, c
 	if existing, ok := s.getConfigTx(tx, key); ok {
 		before = marshalCompact(existing)
 	}
-	cfg := OpsConfig{Key: key, Value: value, Description: description, UpdatedBy: adminID, UpdatedAt: nowMS()}
+	cfg := OpsConfig{Key: key, Value: value, Description: description, UpdatedBy: meta.AdminID, UpdatedAt: nowMS()}
 	_, _ = tx.Exec(`
 INSERT INTO ops_configs (config_key,config_value,description,updated_by,updated_at_ms)
 VALUES (?,?,?,?,?)
 ON DUPLICATE KEY UPDATE config_value=VALUES(config_value),description=VALUES(description),updated_by=VALUES(updated_by),updated_at_ms=VALUES(updated_at_ms)`,
 		cfg.Key, cfg.Value, cfg.Description, cfg.UpdatedBy, cfg.UpdatedAt)
-	s.appendAuditTx(tx, adminID, "ops_config.update", "ops_config", key, before, marshalCompact(cfg), requestID, clientIP)
+	s.appendAuditTx(tx, meta.AdminID, "ops_config.update", "ops_config", key, before, marshalCompact(cfg), meta)
 	_ = tx.Commit()
 	return cfg
 }
@@ -210,7 +210,7 @@ func (s *MySQLStore) OpsState() map[string]string {
 	return state
 }
 
-func (s *MySQLStore) CreateMail(playerID, title, body string, gold int64, items []string, adminID, requestID, clientIP string) (*Mail, error) {
+func (s *MySQLStore) CreateMail(playerID, title, body string, gold int64, items []string, expiresAt int64, meta AuditMeta) (*Mail, error) {
 	if _, err := s.GetPlayer(playerID); err != nil {
 		return nil, err
 	}
@@ -219,13 +219,13 @@ func (s *MySQLStore) CreateMail(playerID, title, body string, gold int64, items 
 		return nil, err
 	}
 	defer tx.Rollback()
-	mail := &Mail{MailID: newStoreID("mail"), PlayerID: playerID, Title: title, Body: body, Gold: gold, Items: append([]string(nil), items...), Status: "unclaimed", CreatedBy: adminID, CreatedAt: nowMS()}
+	mail := &Mail{MailID: newStoreID("mail"), PlayerID: playerID, Title: title, Body: body, Gold: gold, Items: append([]string(nil), items...), Status: "unclaimed", ExpiresAt: expiresAt, CreatedBy: meta.AdminID, CreatedAt: nowMS()}
 	if _, err := tx.Exec(`
-INSERT INTO mails (mail_id,player_id,title,body,gold,items_json,status,claimed_at_ms,created_by,created_at_ms)
-VALUES (?,?,?,?,?,?,?,?,?,?)`, mail.MailID, mail.PlayerID, mail.Title, mail.Body, mail.Gold, encodeJSON(mail.Items), mail.Status, mail.ClaimedAt, mail.CreatedBy, mail.CreatedAt); err != nil {
+INSERT INTO mails (mail_id,player_id,title,body,gold,items_json,status,claimed_at_ms,expires_at_ms,created_by,created_at_ms)
+VALUES (?,?,?,?,?,?,?,?,?,?,?)`, mail.MailID, mail.PlayerID, mail.Title, mail.Body, mail.Gold, encodeJSON(mail.Items), mail.Status, mail.ClaimedAt, mail.ExpiresAt, mail.CreatedBy, mail.CreatedAt); err != nil {
 		return nil, err
 	}
-	s.appendAuditTx(tx, adminID, "mail.create", "mail", mail.MailID, "", marshalCompact(mail), requestID, clientIP)
+	s.appendAuditTx(tx, meta.AdminID, "mail.create", "mail", mail.MailID, "", marshalCompact(mail), meta)
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -236,7 +236,7 @@ func (s *MySQLStore) ListPlayerMails(playerID string) ([]Mail, error) {
 	if _, err := s.GetPlayer(playerID); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Query(`SELECT mail_id,player_id,title,body,gold,items_json,status,claimed_at_ms,created_by,created_at_ms FROM mails WHERE player_id=? ORDER BY created_at_ms`, playerID)
+	rows, err := s.db.Query(`SELECT mail_id,player_id,title,body,gold,items_json,status,claimed_at_ms,expires_at_ms,created_by,created_at_ms FROM mails WHERE player_id=? ORDER BY created_at_ms`, playerID)
 	if err != nil {
 		return nil, err
 	}
@@ -268,6 +268,9 @@ func (s *MySQLStore) ClaimMail(playerID, mailID, requestID, clientIP string) (*M
 	if mail.Status == "claimed" {
 		return mail, ErrAlreadyClaimed
 	}
+	if mail.ExpiresAt > 0 && mail.ExpiresAt < nowMS() {
+		return mail, ErrExpired
+	}
 	before := marshalCompact(mail)
 	now := nowMS()
 	if _, err := tx.Exec(`UPDATE mails SET status='claimed',claimed_at_ms=? WHERE mail_id=?`, now, mailID); err != nil {
@@ -280,14 +283,14 @@ func (s *MySQLStore) ClaimMail(playerID, mailID, requestID, clientIP string) (*M
 	if err != nil {
 		return nil, err
 	}
-	s.appendAuditTx(tx, "player:"+playerID, "mail.claim", "mail", mailID, before, marshalCompact(updated), requestID, clientIP)
+	s.appendAuditTx(tx, "player:"+playerID, "mail.claim", "mail", mailID, before, marshalCompact(updated), AuditMeta{AdminID: "player:" + playerID, RequestID: requestID, ClientIP: clientIP})
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return updated, nil
 }
 
-func (s *MySQLStore) CreateCDKBatch(name string, gold int64, items []string, count int, maxUses int, expiresAt int64, adminID, requestID, clientIP string) (*CDKBatch, error) {
+func (s *MySQLStore) CreateCDKBatch(name string, gold int64, items []string, count int, maxUses int, expiresAt int64, meta AuditMeta) (*CDKBatch, error) {
 	if count <= 0 || count > 100 {
 		return nil, fmt.Errorf("%w: count must be 1..100", ErrInvalidOperation)
 	}
@@ -300,9 +303,9 @@ func (s *MySQLStore) CreateCDKBatch(name string, gold int64, items []string, cou
 	}
 	defer tx.Rollback()
 	now := nowMS()
-	batch := &CDKBatch{BatchID: newStoreID("batch"), Name: name, Gold: gold, Items: append([]string(nil), items...), MaxUsesPerCode: maxUses, ExpiresAt: expiresAt, CreatedBy: adminID, CreatedAt: now}
-	if _, err := tx.Exec(`INSERT INTO cdk_batches (batch_id,name,gold,items_json,max_uses_per_code,expires_at_ms,created_by,created_at_ms) VALUES (?,?,?,?,?,?,?,?)`,
-		batch.BatchID, batch.Name, batch.Gold, encodeJSON(batch.Items), batch.MaxUsesPerCode, batch.ExpiresAt, batch.CreatedBy, batch.CreatedAt); err != nil {
+	batch := &CDKBatch{BatchID: newStoreID("batch"), Name: name, Gold: gold, Items: append([]string(nil), items...), Status: "active", MaxUsesPerCode: maxUses, ExpiresAt: expiresAt, CreatedBy: meta.AdminID, CreatedAt: now}
+	if _, err := tx.Exec(`INSERT INTO cdk_batches (batch_id,name,gold,items_json,status,max_uses_per_code,expires_at_ms,created_by,created_at_ms) VALUES (?,?,?,?,?,?,?,?,?)`,
+		batch.BatchID, batch.Name, batch.Gold, encodeJSON(batch.Items), batch.Status, batch.MaxUsesPerCode, batch.ExpiresAt, batch.CreatedBy, batch.CreatedAt); err != nil {
 		return nil, err
 	}
 	for i := 0; i < count; i++ {
@@ -313,7 +316,7 @@ func (s *MySQLStore) CreateCDKBatch(name string, gold int64, items []string, cou
 			return nil, err
 		}
 	}
-	s.appendAuditTx(tx, adminID, "cdk_batch.create", "cdk_batch", batch.BatchID, "", marshalCompact(batch), requestID, clientIP)
+	s.appendAuditTx(tx, meta.AdminID, "cdk_batch.create", "cdk_batch", batch.BatchID, "", marshalCompact(batch), meta)
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -321,7 +324,7 @@ func (s *MySQLStore) CreateCDKBatch(name string, gold int64, items []string, cou
 }
 
 func (s *MySQLStore) ListCDKBatches() []CDKBatch {
-	rows, err := s.db.Query(`SELECT batch_id,name,gold,items_json,max_uses_per_code,expires_at_ms,created_by,created_at_ms FROM cdk_batches ORDER BY batch_id`)
+	rows, err := s.db.Query(`SELECT batch_id,name,gold,items_json,status,max_uses_per_code,expires_at_ms,created_by,created_at_ms FROM cdk_batches ORDER BY batch_id`)
 	if err != nil {
 		return nil
 	}
@@ -330,7 +333,7 @@ func (s *MySQLStore) ListCDKBatches() []CDKBatch {
 	for rows.Next() {
 		var batch CDKBatch
 		var itemsJSON string
-		if err := rows.Scan(&batch.BatchID, &batch.Name, &batch.Gold, &itemsJSON, &batch.MaxUsesPerCode, &batch.ExpiresAt, &batch.CreatedBy, &batch.CreatedAt); err == nil {
+		if err := rows.Scan(&batch.BatchID, &batch.Name, &batch.Gold, &itemsJSON, &batch.Status, &batch.MaxUsesPerCode, &batch.ExpiresAt, &batch.CreatedBy, &batch.CreatedAt); err == nil {
 			batch.Items = decodeStringSlice(itemsJSON)
 			batches = append(batches, batch)
 		}
@@ -348,6 +351,59 @@ func (s *MySQLStore) GetCDK(code string) (*CDK, error) {
 		return nil, err
 	}
 	return &cdk, nil
+}
+
+func (s *MySQLStore) FreezeCDKBatch(batchID string, meta AuditMeta) (*CDKBatch, error) {
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	batch, err := s.getBatchTx(tx, batchID)
+	if err != nil {
+		return nil, err
+	}
+	before := marshalCompact(batch)
+	if _, err := tx.Exec(`UPDATE cdk_batches SET status='frozen' WHERE batch_id=?`, batchID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`UPDATE cdks SET status='frozen' WHERE batch_id=? AND status='active'`, batchID); err != nil {
+		return nil, err
+	}
+	batch.Status = "frozen"
+	s.appendAuditTx(tx, meta.AdminID, "cdk_batch.freeze", "cdk_batch", batchID, before, marshalCompact(batch), meta)
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return batch, nil
+}
+
+func (s *MySQLStore) FreezeCDK(code string, meta AuditMeta) (*CDK, error) {
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	cdk, err := s.getCDKTx(tx, code, true)
+	if err != nil {
+		return nil, err
+	}
+	if cdk.Status == "frozen" {
+		return cdk, nil
+	}
+	if cdk.Status != "active" {
+		return nil, ErrInvalidOperation
+	}
+	before := marshalCompact(cdk)
+	cdk.Status = "frozen"
+	if _, err := tx.Exec(`UPDATE cdks SET status='frozen' WHERE code=?`, code); err != nil {
+		return nil, err
+	}
+	s.appendAuditTx(tx, meta.AdminID, "cdk.freeze", "cdk", code, before, marshalCompact(cdk), meta)
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return cdk, nil
 }
 
 func (s *MySQLStore) RedeemCDK(code, playerID, requestID, clientIP string) (*CDKRedemption, error) {
@@ -369,6 +425,9 @@ func (s *MySQLStore) RedeemCDK(code, playerID, requestID, clientIP string) (*CDK
 	}
 	if cdk.ExpiresAt > 0 && cdk.ExpiresAt < nowMS() {
 		return nil, ErrExpired
+	}
+	if cdk.Status != "active" {
+		return nil, ErrInvalidOperation
 	}
 	if cdk.UsedCount >= cdk.MaxUses {
 		return nil, ErrConflict
@@ -397,7 +456,7 @@ func (s *MySQLStore) RedeemCDK(code, playerID, requestID, clientIP string) (*CDK
 		}
 		return nil, err
 	}
-	s.appendAuditTx(tx, "player:"+playerID, "cdk.redeem", "cdk", code, before, marshalCompact(cdk), requestID, clientIP)
+	s.appendAuditTx(tx, "player:"+playerID, "cdk.redeem", "cdk", code, before, marshalCompact(cdk), AuditMeta{AdminID: "player:" + playerID, RequestID: requestID, ClientIP: clientIP})
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -441,7 +500,7 @@ func (s *MySQLStore) ListAudits(filter AuditFilter) []AuditLog {
 		clauses = append(clauses, "created_at_ms<=?")
 		args = append(args, filter.ToMS)
 	}
-	rows, err := s.db.Query(`SELECT id,admin_id,action,target_type,target_id,before_json,after_json,request_id,client_ip,created_at_ms FROM audit_logs WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at_ms`, args...)
+	rows, err := s.db.Query(`SELECT id,admin_id,action,target_type,target_id,before_json,after_json,request_id,client_ip,agent_session_id,agent_mode,confirmation_id,confirmed_by,confirmed_at_ms,created_at_ms FROM audit_logs WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at_ms`, args...)
 	if err != nil {
 		return nil
 	}
@@ -449,7 +508,7 @@ func (s *MySQLStore) ListAudits(filter AuditFilter) []AuditLog {
 	var audits []AuditLog
 	for rows.Next() {
 		var audit AuditLog
-		if err := rows.Scan(&audit.ID, &audit.AdminID, &audit.Action, &audit.TargetType, &audit.TargetID, &audit.BeforeJSON, &audit.AfterJSON, &audit.RequestID, &audit.ClientIP, &audit.CreatedAt); err == nil {
+		if err := rows.Scan(&audit.ID, &audit.AdminID, &audit.Action, &audit.TargetType, &audit.TargetID, &audit.BeforeJSON, &audit.AfterJSON, &audit.RequestID, &audit.ClientIP, &audit.AgentSessionID, &audit.AgentMode, &audit.ConfirmationID, &audit.ConfirmedBy, &audit.ConfirmedAt, &audit.CreatedAt); err == nil {
 			audits = append(audits, audit)
 		}
 	}
@@ -495,7 +554,7 @@ func (s *MySQLStore) getConfigTx(tx *sql.Tx, key string) (OpsConfig, bool) {
 }
 
 func (s *MySQLStore) getMailTx(tx *sql.Tx, playerID, mailID string, lock bool) (*Mail, error) {
-	query := `SELECT mail_id,player_id,title,body,gold,items_json,status,claimed_at_ms,created_by,created_at_ms FROM mails WHERE mail_id=? AND player_id=?`
+	query := `SELECT mail_id,player_id,title,body,gold,items_json,status,claimed_at_ms,expires_at_ms,created_by,created_at_ms FROM mails WHERE mail_id=? AND player_id=?`
 	if lock {
 		query += " FOR UPDATE"
 	}
@@ -521,8 +580,8 @@ func (s *MySQLStore) getCDKTx(tx *sql.Tx, code string, lock bool) (*CDK, error) 
 func (s *MySQLStore) getBatchTx(tx *sql.Tx, batchID string) (*CDKBatch, error) {
 	var batch CDKBatch
 	var itemsJSON string
-	err := tx.QueryRow(`SELECT batch_id,name,gold,items_json,max_uses_per_code,expires_at_ms,created_by,created_at_ms FROM cdk_batches WHERE batch_id=?`, batchID).
-		Scan(&batch.BatchID, &batch.Name, &batch.Gold, &itemsJSON, &batch.MaxUsesPerCode, &batch.ExpiresAt, &batch.CreatedBy, &batch.CreatedAt)
+	err := tx.QueryRow(`SELECT batch_id,name,gold,items_json,status,max_uses_per_code,expires_at_ms,created_by,created_at_ms FROM cdk_batches WHERE batch_id=?`, batchID).
+		Scan(&batch.BatchID, &batch.Name, &batch.Gold, &itemsJSON, &batch.Status, &batch.MaxUsesPerCode, &batch.ExpiresAt, &batch.CreatedBy, &batch.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -542,9 +601,12 @@ func (s *MySQLStore) getRedemptionTx(tx *sql.Tx, code, playerID string) (*CDKRed
 	return &redemption, true
 }
 
-func (s *MySQLStore) appendAuditTx(tx *sql.Tx, adminID, action, targetType, targetID, before, after, requestID, clientIP string) {
-	_, _ = tx.Exec(`INSERT INTO audit_logs (id,admin_id,action,target_type,target_id,before_json,after_json,request_id,client_ip,created_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-		newStoreID("audit"), adminID, action, targetType, targetID, before, after, requestID, clientIP, nowMS())
+func (s *MySQLStore) appendAuditTx(tx *sql.Tx, adminID, action, targetType, targetID, before, after string, meta AuditMeta) {
+	if adminID == "" {
+		adminID = meta.AdminID
+	}
+	_, _ = tx.Exec(`INSERT INTO audit_logs (id,admin_id,action,target_type,target_id,before_json,after_json,request_id,client_ip,agent_session_id,agent_mode,confirmation_id,confirmed_by,confirmed_at_ms,created_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		newStoreID("audit"), adminID, action, targetType, targetID, before, after, meta.RequestID, meta.ClientIP, meta.Agent.AgentSessionID, meta.Agent.AgentMode, meta.Agent.ConfirmationID, meta.Agent.ConfirmedBy, meta.Agent.ConfirmedAt, nowMS())
 }
 
 type rowScanner interface {
@@ -560,7 +622,7 @@ func scanPlayer(row rowScanner) (Player, error) {
 func scanMail(row rowScanner) (Mail, error) {
 	var mail Mail
 	var itemsJSON string
-	err := row.Scan(&mail.MailID, &mail.PlayerID, &mail.Title, &mail.Body, &mail.Gold, &itemsJSON, &mail.Status, &mail.ClaimedAt, &mail.CreatedBy, &mail.CreatedAt)
+	err := row.Scan(&mail.MailID, &mail.PlayerID, &mail.Title, &mail.Body, &mail.Gold, &itemsJSON, &mail.Status, &mail.ClaimedAt, &mail.ExpiresAt, &mail.CreatedBy, &mail.CreatedAt)
 	mail.Items = decodeStringSlice(itemsJSON)
 	return mail, err
 }

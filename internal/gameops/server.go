@@ -3,6 +3,7 @@ package gameops
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -29,6 +30,9 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.Handle("GET /metrics", s.metrics)
+	mux.HandleFunc("GET /api/agent/capabilities", s.handleAgentCapabilities)
+	mux.HandleFunc("GET /api/agent/events", s.handleAgentEvents)
+	mux.HandleFunc("GET /api/agent/logs", s.handleAgentLogs)
 	mux.HandleFunc("POST /api/admin/login", s.handleLogin)
 	mux.HandleFunc("GET /api/public/ops-state", s.handleOpsState)
 	mux.HandleFunc("GET /api/public/players/{player_id}/state", s.handlePublicPlayerState)
@@ -44,12 +48,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/players/{player_id}/unban", s.withAdmin(s.handleUnbanPlayer))
 	mux.HandleFunc("GET /api/ops-configs", s.withAdmin(s.handleListConfigs))
 	mux.HandleFunc("PUT /api/ops-configs/{config_key}", s.withAdmin(s.handleUpdateConfig))
+	mux.HandleFunc("POST /api/mails/preview", s.withAdmin(s.handlePreviewMail))
 	mux.HandleFunc("POST /api/mails", s.withAdmin(s.handleCreateMail))
 	mux.HandleFunc("GET /api/players/{player_id}/mails", s.withAdmin(s.handleListMails))
 	mux.HandleFunc("POST /api/cdk/batches", s.withAdmin(s.handleCreateCDKBatch))
 	mux.HandleFunc("GET /api/cdk/batches", s.withAdmin(s.handleListCDKBatches))
+	mux.HandleFunc("POST /api/cdk/batches/{batch_id}/freeze", s.withAdmin(s.handleFreezeCDKBatch))
 	mux.HandleFunc("GET /api/cdk/{code}", s.withAdmin(s.handleGetCDK))
+	mux.HandleFunc("POST /api/cdk/{code}/freeze", s.withAdmin(s.handleFreezeCDK))
 	mux.HandleFunc("GET /api/audit-logs", s.withAdmin(s.handleAuditLogs))
+	mux.HandleFunc("POST /api/risk/analyze", s.withAdmin(s.handleRiskAnalyze))
 	mux.HandleFunc("GET /api/integrations/corerank/health", s.withAdmin(s.handleCoreRankHealth))
 	mux.HandleFunc("GET /api/integrations/corerank/leaderboard", s.withAdmin(s.handleCoreRankLeaderboard))
 	mux.HandleFunc("GET /api/integrations/corerank/players/{player_id}/rank", s.withAdmin(s.handleCoreRankPlayerRank))
@@ -130,7 +138,7 @@ func (s *Server) handleSeedPlayers(w http.ResponseWriter, r *http.Request, princ
 	if !s.requireRole(w, principal, "admin") {
 		return
 	}
-	players := s.store.SeedPlayers(principal.UserID, requestID(r), clientIP(r))
+	players := s.store.SeedPlayers(auditMetaFromRequest(r, principal, AgentAuditFields{}))
 	s.metrics.auditWrites.Add(1)
 	s.writeJSON(w, http.StatusCreated, players)
 }
@@ -155,18 +163,20 @@ func (s *Server) handleBanPlayer(w http.ResponseWriter, r *http.Request, princip
 	var req struct {
 		Reason        string `json:"reason"`
 		BannedSeconds int64  `json:"banned_seconds"`
+		AgentAuditFields
 	}
 	if !s.decode(w, r, &req) {
+		return
+	}
+	if err := validateBanSeconds(req.BannedSeconds); err != nil {
+		s.writeDomainError(w, err)
 		return
 	}
 	if req.Reason == "" {
 		req.Reason = "gm_action"
 	}
-	until := int64(0)
-	if req.BannedSeconds > 0 {
-		until = nowMS() + req.BannedSeconds*1000
-	}
-	player, err := s.store.BanPlayer(r.PathValue("player_id"), req.Reason, until, principal.UserID, requestID(r), clientIP(r))
+	until := nowMS() + req.BannedSeconds*1000
+	player, err := s.store.BanPlayer(r.PathValue("player_id"), req.Reason, until, auditMetaFromRequest(r, principal, req.AgentAuditFields))
 	if err != nil {
 		s.writeDomainError(w, err)
 		return
@@ -179,7 +189,7 @@ func (s *Server) handleUnbanPlayer(w http.ResponseWriter, r *http.Request, princ
 	if !s.requireRole(w, principal, "admin") {
 		return
 	}
-	player, err := s.store.UnbanPlayer(r.PathValue("player_id"), principal.UserID, requestID(r), clientIP(r))
+	player, err := s.store.UnbanPlayer(r.PathValue("player_id"), auditMetaFromRequest(r, principal, AgentAuditFields{}))
 	if err != nil {
 		s.writeDomainError(w, err)
 		return
@@ -199,11 +209,12 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request, prin
 	var req struct {
 		Value       string `json:"config_value"`
 		Description string `json:"description"`
+		AgentAuditFields
 	}
 	if !s.decode(w, r, &req) {
 		return
 	}
-	cfg := s.store.UpdateConfig(r.PathValue("config_key"), req.Value, req.Description, principal.UserID, requestID(r), clientIP(r))
+	cfg := s.store.UpdateConfig(r.PathValue("config_key"), req.Value, req.Description, auditMetaFromRequest(r, principal, req.AgentAuditFields))
 	s.metrics.auditWrites.Add(1)
 	s.writeJSON(w, http.StatusOK, cfg)
 }
@@ -226,21 +237,79 @@ func (s *Server) handlePublicPlayerState(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+func (s *Server) handlePreviewMail(w http.ResponseWriter, r *http.Request, principal Principal) {
+	if !s.requireRole(w, principal, "admin", "operator") {
+		return
+	}
+	var req struct {
+		PlayerID         string   `json:"player_id"`
+		PlayerIDs        []string `json:"player_ids"`
+		Title            string   `json:"title"`
+		Body             string   `json:"body"`
+		Gold             int64    `json:"gold"`
+		Items            []string `json:"items"`
+		ExpiresInSeconds int64    `json:"expires_in_seconds"`
+	}
+	if !s.decode(w, r, &req) {
+		return
+	}
+	draft := MailDraft{
+		PlayerID:         req.PlayerID,
+		PlayerIDs:        req.PlayerIDs,
+		Title:            req.Title,
+		Body:             req.Body,
+		Gold:             req.Gold,
+		Items:            req.Items,
+		ExpiresInSeconds: req.ExpiresInSeconds,
+	}
+	preview := PreviewMailDraft(draft, nowMS())
+	for _, playerID := range mailTargets(draft) {
+		if _, err := s.store.GetPlayer(playerID); err != nil {
+			preview.Allowed = false
+			preview.RiskLevel = "blocked"
+			preview.Violations = append(preview.Violations, "player not found: "+playerID)
+		}
+	}
+	s.writeJSON(w, http.StatusOK, preview)
+}
+
 func (s *Server) handleCreateMail(w http.ResponseWriter, r *http.Request, principal Principal) {
 	if !s.requireRole(w, principal, "admin", "operator") {
 		return
 	}
 	var req struct {
-		PlayerID string   `json:"player_id"`
-		Title    string   `json:"title"`
-		Body     string   `json:"body"`
-		Gold     int64    `json:"gold"`
-		Items    []string `json:"items"`
+		PlayerID         string   `json:"player_id"`
+		PlayerIDs        []string `json:"player_ids"`
+		Title            string   `json:"title"`
+		Body             string   `json:"body"`
+		Gold             int64    `json:"gold"`
+		Items            []string `json:"items"`
+		ExpiresInSeconds int64    `json:"expires_in_seconds"`
+		AgentAuditFields
 	}
 	if !s.decode(w, r, &req) {
 		return
 	}
-	mail, err := s.store.CreateMail(req.PlayerID, req.Title, req.Body, req.Gold, req.Items, principal.UserID, requestID(r), clientIP(r))
+	draft := MailDraft{
+		PlayerID:         req.PlayerID,
+		PlayerIDs:        req.PlayerIDs,
+		Title:            req.Title,
+		Body:             req.Body,
+		Gold:             req.Gold,
+		Items:            req.Items,
+		ExpiresInSeconds: req.ExpiresInSeconds,
+	}
+	targets := mailTargets(draft)
+	if len(targets) != 1 {
+		s.writeDomainError(w, fmt.Errorf("%w: POST /api/mails requires exactly one player_id", ErrInvalidOperation))
+		return
+	}
+	preview, err := validateMailDraft(draft, nowMS())
+	if err != nil {
+		s.writeDomainError(w, err)
+		return
+	}
+	mail, err := s.store.CreateMail(targets[0], req.Title, req.Body, req.Gold, req.Items, preview.ExpiresAt, auditMetaFromRequest(r, principal, req.AgentAuditFields))
 	if err != nil {
 		s.writeDomainError(w, err)
 		return
@@ -284,15 +353,24 @@ func (s *Server) handleCreateCDKBatch(w http.ResponseWriter, r *http.Request, pr
 		Count          int      `json:"count"`
 		MaxUsesPerCode int      `json:"max_uses_per_code"`
 		ExpiresInSec   int64    `json:"expires_in_seconds"`
+		AgentAuditFields
 	}
 	if !s.decode(w, r, &req) {
 		return
 	}
 	expiresAt := int64(0)
 	if req.ExpiresInSec > 0 {
+		if req.ExpiresInSec < MinMailExpiresSeconds || req.ExpiresInSec > MaxMailExpiresSeconds {
+			s.writeDomainError(w, fmt.Errorf("%w: expires_in_seconds out of allowed range", ErrInvalidOperation))
+			return
+		}
 		expiresAt = nowMS() + req.ExpiresInSec*1000
 	}
-	batch, err := s.store.CreateCDKBatch(req.Name, req.Gold, req.Items, req.Count, req.MaxUsesPerCode, expiresAt, principal.UserID, requestID(r), clientIP(r))
+	if req.Gold > MaxSingleMailGold || len(req.Items) > MaxMailItemCount {
+		s.writeDomainError(w, fmt.Errorf("%w: reward exceeds configured safety limits", ErrInvalidOperation))
+		return
+	}
+	batch, err := s.store.CreateCDKBatch(req.Name, req.Gold, req.Items, req.Count, req.MaxUsesPerCode, expiresAt, auditMetaFromRequest(r, principal, req.AgentAuditFields))
 	if err != nil {
 		s.writeDomainError(w, err)
 		return
@@ -311,6 +389,32 @@ func (s *Server) handleGetCDK(w http.ResponseWriter, r *http.Request, _ Principa
 		s.writeDomainError(w, err)
 		return
 	}
+	s.writeJSON(w, http.StatusOK, cdk)
+}
+
+func (s *Server) handleFreezeCDKBatch(w http.ResponseWriter, r *http.Request, principal Principal) {
+	if !s.requireRole(w, principal, "admin") {
+		return
+	}
+	batch, err := s.store.FreezeCDKBatch(r.PathValue("batch_id"), auditMetaFromRequest(r, principal, AgentAuditFields{}))
+	if err != nil {
+		s.writeDomainError(w, err)
+		return
+	}
+	s.metrics.auditWrites.Add(1)
+	s.writeJSON(w, http.StatusOK, batch)
+}
+
+func (s *Server) handleFreezeCDK(w http.ResponseWriter, r *http.Request, principal Principal) {
+	if !s.requireRole(w, principal, "admin") {
+		return
+	}
+	cdk, err := s.store.FreezeCDK(r.PathValue("code"), auditMetaFromRequest(r, principal, AgentAuditFields{}))
+	if err != nil {
+		s.writeDomainError(w, err)
+		return
+	}
+	s.metrics.auditWrites.Add(1)
 	s.writeJSON(w, http.StatusOK, cdk)
 }
 
@@ -354,6 +458,49 @@ func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request, princip
 		return
 	}
 	s.writeJSON(w, http.StatusOK, s.store.ListAudits(parseAuditFilter(r)))
+}
+
+func (s *Server) handleRiskAnalyze(w http.ResponseWriter, r *http.Request, principal Principal) {
+	if !s.requireRole(w, principal, "admin", "auditor") {
+		return
+	}
+	var req RiskAnalyzeRequest
+	if !s.decode(w, r, &req) {
+		return
+	}
+	if req.FromMS > 0 && req.ToMS > 0 && req.FromMS > req.ToMS {
+		s.writeError(w, http.StatusBadRequest, errors.New("from_ms must be less than or equal to to_ms"))
+		return
+	}
+	useAI := true
+	if req.UseAI != nil {
+		useAI = *req.UseAI
+	}
+	provider := req.AIProvider
+	if provider == "" {
+		provider = s.cfg.RiskAIProvider
+	}
+	if provider == "" {
+		provider = "mock-ai"
+	}
+	if useAI && provider != "mock-ai" {
+		s.writeError(w, http.StatusBadRequest, errors.New("unsupported ai_provider: only mock-ai is available in demo mode"))
+		return
+	}
+	if !useAI {
+		provider = "rules-only"
+	}
+
+	audits := s.store.ListAudits(AuditFilter{FromMS: req.FromMS, ToMS: req.ToMS})
+	report := AnalyzeOperationalRisk(audits, RiskAnalyzeOptions{
+		FromMS:     req.FromMS,
+		ToMS:       req.ToMS,
+		UseAI:      useAI,
+		AIProvider: provider,
+		AnalyzedAt: nowMS(),
+	})
+	s.metrics.riskAnalyses.Add(1)
+	s.writeJSON(w, http.StatusOK, report)
 }
 
 func (s *Server) handleCoreRankHealth(w http.ResponseWriter, r *http.Request, _ Principal) {
@@ -428,6 +575,36 @@ func clientIP(r *http.Request) string {
 
 func requestID(r *http.Request) string {
 	return requestIDFromContext(r.Context())
+}
+
+func auditMetaFromRequest(r *http.Request, principal Principal, body AgentAuditFields) AuditMeta {
+	agent := body
+	if agent.AgentSessionID == "" {
+		agent.AgentSessionID = r.Header.Get("X-Agent-Session-ID")
+	}
+	if agent.AgentMode == "" {
+		agent.AgentMode = r.Header.Get("X-Agent-Mode")
+	}
+	if agent.ConfirmationID == "" {
+		agent.ConfirmationID = r.Header.Get("X-Agent-Confirmation-ID")
+	}
+	if agent.ConfirmedBy == "" {
+		agent.ConfirmedBy = r.Header.Get("X-Agent-Confirmed-By")
+	}
+	if agent.ConfirmedAt == 0 {
+		if value := r.Header.Get("X-Agent-Confirmed-At"); value != "" {
+			agent.ConfirmedAt, _ = strconvParseInt(value)
+		}
+	}
+	if agent.ConfirmationID != "" && agent.ConfirmedBy == "" {
+		agent.ConfirmedBy = principal.UserID
+	}
+	return AuditMeta{
+		AdminID:   principal.UserID,
+		RequestID: requestID(r),
+		ClientIP:  clientIP(r),
+		Agent:     agent,
+	}
 }
 
 func (s *Server) requireRole(w http.ResponseWriter, principal Principal, roles ...string) bool {

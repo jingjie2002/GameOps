@@ -12,7 +12,7 @@ ADDR = "127.0.0.1:18090"
 BASE_URL = f"http://{ADDR}"
 
 
-def request(method, path, token=None, payload=None, expected=(200, 201)):
+def request(method, path, token=None, payload=None, expected=(200, 201), extra_headers=None):
     data = None
     headers = {}
     if payload is not None:
@@ -20,6 +20,8 @@ def request(method, path, token=None, payload=None, expected=(200, 201)):
         headers["Content-Type"] = "application/json"
     if token:
         headers["Authorization"] = "Bearer " + token
+    if extra_headers:
+        headers.update(extra_headers)
     req = urllib.request.Request(BASE_URL + path, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=3) as resp:
@@ -83,14 +85,30 @@ def main():
         state = request("GET", "/api/public/ops-state")
         print(f"public_ops_state ranked_maintenance={state['ranked_maintenance']}")
 
+        preview = request("POST", "/api/mails/preview", token=token, payload={
+            "player_id": "player_1001",
+            "title": "SS25 ranked reward",
+            "body": "Season compensation",
+            "gold": 500,
+            "items": ["skin_trial"],
+            "expires_in_seconds": 3600,
+        })
+        print(f"preview_mail allowed={preview['allowed']} risk={preview['risk_level']} expires_at={preview['expires_at']}")
+
         mail = request("POST", "/api/mails", token=token, payload={
             "player_id": "player_1001",
             "title": "SS25 ranked reward",
             "body": "Season compensation",
             "gold": 500,
             "items": ["skin_trial"],
+            "expires_in_seconds": 3600,
+            "agent_session_id": "sess_demo_001",
+            "agent_mode": "完全访问权限",
+            "confirmation_id": "confirm_demo_mail",
+            "confirmed_by": "demo_user",
+            "confirmed_at": int(time.time() * 1000),
         })
-        print(f"create_mail {mail['mail_id']}")
+        print(f"create_mail {mail['mail_id']} expires_at={mail['expires_at']}")
 
         claimed = request("POST", f"/api/players/player_1001/mails/{mail['mail_id']}/claim", payload={})
         print(f"claim_mail {claimed['mail_id']} status={claimed['status']}")
@@ -115,6 +133,33 @@ def main():
         duplicate_redeem = request("POST", f"/api/cdk/{code}/redeem", payload={"player_id": "player_1002"}, expected=(409,))
         print(f"duplicate_redeem blocked={duplicate_redeem['error']}")
 
+        freeze_batch = request("POST", "/api/cdk/batches", token=token, payload={
+            "name": "freeze demo",
+            "gold": 100,
+            "items": ["ticket"],
+            "count": 2,
+            "max_uses_per_code": 1,
+            "expires_in_seconds": 3600,
+        })
+        freeze_code = freeze_batch["codes"][0]
+        frozen = request(
+            "POST",
+            f"/api/cdk/{freeze_code}/freeze",
+            token=token,
+            payload=None,
+            extra_headers={
+                "X-Agent-Session-ID": "sess_demo_002",
+                "X-Agent-Mode": "full-access",
+                "X-Agent-Confirmation-ID": "confirm_demo_freeze",
+            },
+        )
+        print(f"freeze_cdk {frozen['code']} status={frozen['status']}")
+        frozen_redeem = request("POST", f"/api/cdk/{freeze_code}/redeem", payload={"player_id": "player_1002"}, expected=(400,))
+        print(f"frozen_redeem blocked={frozen_redeem['error']}")
+
+        frozen_batch = request("POST", f"/api/cdk/batches/{freeze_batch['batch_id']}/freeze", token=token, payload=None)
+        print(f"freeze_cdk_batch {frozen_batch['batch_id']} status={frozen_batch['status']}")
+
         event = request("POST", "/api/events", payload={
             "type": "reward_claim",
             "player_id": "player_1001",
@@ -124,6 +169,11 @@ def main():
 
         audits = request("GET", "/api/audit-logs", token=token)
         print(f"audit_logs count={len(audits)}")
+        if not any(item.get("agent_session_id") == "sess_demo_001" and item.get("confirmation_id") == "confirm_demo_mail" for item in audits):
+            raise RuntimeError("mail agent audit fields missing")
+        if not any(item.get("agent_session_id") == "sess_demo_002" and item.get("confirmation_id") == "confirm_demo_freeze" for item in audits):
+            raise RuntimeError("cdk freeze agent audit fields missing")
+        print("agent_audit_fields recorded")
 
         metrics = urllib.request.urlopen(BASE_URL + "/metrics", timeout=3).read().decode("utf-8")
         if "gameops_requests_total" not in metrics or "gameops_cdk_redeems_total" not in metrics:

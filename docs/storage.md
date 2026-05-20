@@ -8,17 +8,29 @@ GameOps V1.5 使用 MySQL 承载运营侧持久化数据：
 - `player_status_logs`：封禁/解封状态变更记录。
 - `ops_configs`：公告、活动、维护等运营配置。
 - `mails`：奖励邮件。
-- `cdk_batches`：CDK 批次。
+- `cdk_batches`：CDK 批次，包含批次冻结状态。
 - `cdks`：单个兑换码状态。
 - `cdk_redemptions`：兑换记录，使用 `(code, player_id)` 唯一约束防止同一玩家重复兑换。
 - `game_events`：最小运营事件。
-- `audit_logs`：后台写操作审计日志。
+- `audit_logs`：后台写操作审计日志，包含 Agent 会话和人工确认字段。
 
 表结构文件：
 
 ```text
 internal/gameops/mysql_schema.sql
 ```
+
+既有 MySQL 库从 V1.5/V1.6 升到 V2.5 时，先按实际库结构确认字段是否已存在，再执行：
+
+```text
+docs/mysql-migrations-v2.5.sql
+```
+
+V2.5 为 GM 安全能力补充了以下持久化字段：
+
+- `mails.expires_at_ms`：邮件过期时间，过期后不可领取。
+- `cdk_batches.status`：批次状态，冻结批次后批次内未使用 CDK 会变为不可兑换。
+- `audit_logs.agent_session_id`、`agent_mode`、`confirmation_id`、`confirmed_by`、`confirmed_at_ms`：Agent 会话与人工确认审计信息。
 
 ## Redis
 

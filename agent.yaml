@@ -1,0 +1,77 @@
+id: gameops
+name: GameOps
+description: 游戏运营后台与 GM 管理服务
+type: go-service
+root: F:/AI编程/简历/GameOps
+
+health:
+  url: http://127.0.0.1:18090/healthz
+
+metrics:
+  url: http://127.0.0.1:18090/metrics
+  format: prometheus
+
+capabilities_endpoint:
+  url: http://127.0.0.1:18090/api/agent/capabilities
+
+commands:
+  test:
+    command: go test ./...
+    mode: 自动审查
+  vet:
+    command: go vet ./...
+    mode: 自动审查
+  demo:
+    command: python scripts/demo_flow.py
+    mode: 自动审查
+  risk_demo:
+    command: python scripts/risk_ai_demo.py
+    mode: 自动审查
+  smoke:
+    command: python scripts/agent_smoke.py
+    mode: 自动审查
+
+docs:
+  - README.md
+  - docs/api.md
+  - docs/verification.md
+  - docs/ai-risk-assistant.md
+  - docs/agent-integration.md
+  - docs/mysql-migrations-v2.5.sql
+
+capabilities:
+  - health
+  - metrics
+  - go_test
+  - go_vet
+  - admin_login
+  - player_query
+  - mail_query
+  - cdk_query
+  - audit_log_query
+  - ops_config_query
+  - gm_risk_analyze
+  - mail_preview
+  - mail_expiration
+  - reward_limit_policy
+  - cdk_freeze
+  - agent_audit_fields
+  - corerank_readonly_integration
+  - agent_events
+  - agent_logs
+
+agent_tools:
+  gameops_analyze_gm_risk: POST /api/risk/analyze
+  gameops_preview_mail: POST /api/mails/preview
+  gameops_send_mail: POST /api/mails
+  gameops_ban_player: POST /api/players/{player_id}/ban
+  gameops_unban_player: POST /api/players/{player_id}/unban
+  gameops_freeze_cdk: POST /api/cdk/{code}/freeze
+  gameops_freeze_cdk_batch: POST /api/cdk/batches/{batch_id}/freeze
+
+forbidden:
+  - direct_database_write
+  - direct_database_delete
+  - gm_write_without_confirm
+  - bulk_reward_without_confirm
+  - production_deploy_without_confirm

@@ -50,7 +50,7 @@ func NewMemoryStore() *MemoryStore {
 	return store
 }
 
-func (s *MemoryStore) SeedPlayers(adminID, requestID, clientIP string) []Player {
+func (s *MemoryStore) SeedPlayers(meta AuditMeta) []Player {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -69,7 +69,7 @@ func (s *MemoryStore) SeedPlayers(adminID, requestID, clientIP string) []Player 
 		s.players[player.PlayerID] = &copyPlayer
 		result = append(result, copyPlayer)
 	}
-	s.appendAuditLocked(adminID, "players.seed", "players", "demo", "", marshalCompact(result), requestID, clientIP)
+	s.appendAuditLocked(meta.AdminID, "players.seed", "players", "demo", "", marshalCompact(result), meta)
 	return result
 }
 
@@ -97,7 +97,7 @@ func (s *MemoryStore) GetPlayer(playerID string) (*Player, error) {
 	return &copyPlayer, nil
 }
 
-func (s *MemoryStore) BanPlayer(playerID, reason string, until int64, adminID, requestID, clientIP string) (*Player, error) {
+func (s *MemoryStore) BanPlayer(playerID, reason string, until int64, meta AuditMeta) (*Player, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -111,12 +111,12 @@ func (s *MemoryStore) BanPlayer(playerID, reason string, until int64, adminID, r
 	player.BannedUntil = until
 	player.UpdatedAt = nowMS()
 	after := marshalCompact(player)
-	s.appendAuditLocked(adminID, "player.ban", "player", playerID, before, after, requestID, clientIP)
+	s.appendAuditLocked(meta.AdminID, "player.ban", "player", playerID, before, after, meta)
 	copyPlayer := *player
 	return &copyPlayer, nil
 }
 
-func (s *MemoryStore) UnbanPlayer(playerID, adminID, requestID, clientIP string) (*Player, error) {
+func (s *MemoryStore) UnbanPlayer(playerID string, meta AuditMeta) (*Player, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -130,7 +130,7 @@ func (s *MemoryStore) UnbanPlayer(playerID, adminID, requestID, clientIP string)
 	player.BannedUntil = 0
 	player.UpdatedAt = nowMS()
 	after := marshalCompact(player)
-	s.appendAuditLocked(adminID, "player.unban", "player", playerID, before, after, requestID, clientIP)
+	s.appendAuditLocked(meta.AdminID, "player.unban", "player", playerID, before, after, meta)
 	copyPlayer := *player
 	return &copyPlayer, nil
 }
@@ -147,7 +147,7 @@ func (s *MemoryStore) ListConfigs() []OpsConfig {
 	return configs
 }
 
-func (s *MemoryStore) UpdateConfig(key, value, description, adminID, requestID, clientIP string) OpsConfig {
+func (s *MemoryStore) UpdateConfig(key, value, description string, meta AuditMeta) OpsConfig {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -159,11 +159,11 @@ func (s *MemoryStore) UpdateConfig(key, value, description, adminID, requestID, 
 		Key:         key,
 		Value:       value,
 		Description: description,
-		UpdatedBy:   adminID,
+		UpdatedBy:   meta.AdminID,
 		UpdatedAt:   nowMS(),
 	}
 	s.configs[key] = cfg
-	s.appendAuditLocked(adminID, "ops_config.update", "ops_config", key, before, marshalCompact(cfg), requestID, clientIP)
+	s.appendAuditLocked(meta.AdminID, "ops_config.update", "ops_config", key, before, marshalCompact(cfg), meta)
 	return *cfg
 }
 
@@ -178,7 +178,7 @@ func (s *MemoryStore) OpsState() map[string]string {
 	return state
 }
 
-func (s *MemoryStore) CreateMail(playerID, title, body string, gold int64, items []string, adminID, requestID, clientIP string) (*Mail, error) {
+func (s *MemoryStore) CreateMail(playerID, title, body string, gold int64, items []string, expiresAt int64, meta AuditMeta) (*Mail, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -194,12 +194,13 @@ func (s *MemoryStore) CreateMail(playerID, title, body string, gold int64, items
 		Gold:      gold,
 		Items:     append([]string(nil), items...),
 		Status:    "unclaimed",
-		CreatedBy: adminID,
+		ExpiresAt: expiresAt,
+		CreatedBy: meta.AdminID,
 		CreatedAt: now,
 	}
 	s.mails[mail.MailID] = mail
 	s.mailsByUser[playerID] = append(s.mailsByUser[playerID], mail.MailID)
-	s.appendAuditLocked(adminID, "mail.create", "mail", mail.MailID, "", marshalCompact(mail), requestID, clientIP)
+	s.appendAuditLocked(meta.AdminID, "mail.create", "mail", mail.MailID, "", marshalCompact(mail), meta)
 	copyMail := *mail
 	return &copyMail, nil
 }
@@ -234,17 +235,21 @@ func (s *MemoryStore) ClaimMail(playerID, mailID, requestID, clientIP string) (*
 		copyMail := *mail
 		return &copyMail, ErrAlreadyClaimed
 	}
+	if mail.ExpiresAt > 0 && mail.ExpiresAt < nowMS() {
+		copyMail := *mail
+		return &copyMail, ErrExpired
+	}
 	before := marshalCompact(mail)
 	mail.Status = "claimed"
 	mail.ClaimedAt = nowMS()
 	player.Gold += mail.Gold
 	player.UpdatedAt = mail.ClaimedAt
-	s.appendAuditLocked("player:"+playerID, "mail.claim", "mail", mailID, before, marshalCompact(mail), requestID, clientIP)
+	s.appendAuditLocked("player:"+playerID, "mail.claim", "mail", mailID, before, marshalCompact(mail), AuditMeta{AdminID: "player:" + playerID, RequestID: requestID, ClientIP: clientIP})
 	copyMail := *mail
 	return &copyMail, nil
 }
 
-func (s *MemoryStore) CreateCDKBatch(name string, gold int64, items []string, count int, maxUses int, expiresAt int64, adminID, requestID, clientIP string) (*CDKBatch, error) {
+func (s *MemoryStore) CreateCDKBatch(name string, gold int64, items []string, count int, maxUses int, expiresAt int64, meta AuditMeta) (*CDKBatch, error) {
 	if count <= 0 || count > 100 {
 		return nil, fmt.Errorf("%w: count must be 1..100", ErrInvalidOperation)
 	}
@@ -261,9 +266,10 @@ func (s *MemoryStore) CreateCDKBatch(name string, gold int64, items []string, co
 		Name:           name,
 		Gold:           gold,
 		Items:          append([]string(nil), items...),
+		Status:         "active",
 		MaxUsesPerCode: maxUses,
 		ExpiresAt:      expiresAt,
-		CreatedBy:      adminID,
+		CreatedBy:      meta.AdminID,
 		CreatedAt:      now,
 	}
 	for i := 0; i < count; i++ {
@@ -280,7 +286,7 @@ func (s *MemoryStore) CreateCDKBatch(name string, gold int64, items []string, co
 		batch.Codes = append(batch.Codes, code)
 	}
 	s.batches[batch.BatchID] = batch
-	s.appendAuditLocked(adminID, "cdk_batch.create", "cdk_batch", batch.BatchID, "", marshalCompact(batch), requestID, clientIP)
+	s.appendAuditLocked(meta.AdminID, "cdk_batch.create", "cdk_batch", batch.BatchID, "", marshalCompact(batch), meta)
 	copyBatch := *batch
 	copyBatch.Codes = append([]string(nil), batch.Codes...)
 	return &copyBatch, nil
@@ -312,6 +318,49 @@ func (s *MemoryStore) GetCDK(code string) (*CDK, error) {
 	return &copyCDK, nil
 }
 
+func (s *MemoryStore) FreezeCDKBatch(batchID string, meta AuditMeta) (*CDKBatch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	batch, ok := s.batches[batchID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	before := marshalCompact(batch)
+	batch.Status = "frozen"
+	for _, code := range batch.Codes {
+		if cdk, ok := s.cdks[code]; ok && cdk.Status == "active" {
+			cdk.Status = "frozen"
+		}
+	}
+	s.appendAuditLocked(meta.AdminID, "cdk_batch.freeze", "cdk_batch", batchID, before, marshalCompact(batch), meta)
+	copyBatch := *batch
+	copyBatch.Codes = append([]string(nil), batch.Codes...)
+	return &copyBatch, nil
+}
+
+func (s *MemoryStore) FreezeCDK(code string, meta AuditMeta) (*CDK, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cdk, ok := s.cdks[code]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if cdk.Status == "frozen" {
+		copyCDK := *cdk
+		return &copyCDK, nil
+	}
+	if cdk.Status != "active" {
+		return nil, ErrInvalidOperation
+	}
+	before := marshalCompact(cdk)
+	cdk.Status = "frozen"
+	s.appendAuditLocked(meta.AdminID, "cdk.freeze", "cdk", code, before, marshalCompact(cdk), meta)
+	copyCDK := *cdk
+	return &copyCDK, nil
+}
+
 func (s *MemoryStore) RedeemCDK(code, playerID, requestID, clientIP string) (*CDKRedemption, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -332,6 +381,9 @@ func (s *MemoryStore) RedeemCDK(code, playerID, requestID, clientIP string) (*CD
 		copyRedemption := *redemption
 		copyRedemption.RewardItems = append([]string(nil), redemption.RewardItems...)
 		return &copyRedemption, ErrAlreadyRedeemed
+	}
+	if cdk.Status != "active" {
+		return nil, ErrInvalidOperation
 	}
 	if cdk.UsedCount >= cdk.MaxUses {
 		return nil, ErrConflict
@@ -354,7 +406,7 @@ func (s *MemoryStore) RedeemCDK(code, playerID, requestID, clientIP string) (*CD
 		CreatedAt:   nowMS(),
 	}
 	s.redemptions[key] = redemption
-	s.appendAuditLocked("player:"+playerID, "cdk.redeem", "cdk", code, before, marshalCompact(cdk), requestID, clientIP)
+	s.appendAuditLocked("player:"+playerID, "cdk.redeem", "cdk", code, before, marshalCompact(cdk), AuditMeta{AdminID: "player:" + playerID, RequestID: requestID, ClientIP: clientIP})
 	copyRedemption := *redemption
 	return &copyRedemption, nil
 }
@@ -405,18 +457,26 @@ func (s *MemoryStore) Stats() map[string]int {
 	}
 }
 
-func (s *MemoryStore) appendAuditLocked(adminID, action, targetType, targetID, before, after, requestID, clientIP string) {
+func (s *MemoryStore) appendAuditLocked(adminID, action, targetType, targetID, before, after string, meta AuditMeta) {
+	if adminID == "" {
+		adminID = meta.AdminID
+	}
 	s.audits = append(s.audits, &AuditLog{
-		ID:         s.next("audit"),
-		AdminID:    adminID,
-		Action:     action,
-		TargetType: targetType,
-		TargetID:   targetID,
-		BeforeJSON: before,
-		AfterJSON:  after,
-		RequestID:  requestID,
-		ClientIP:   clientIP,
-		CreatedAt:  nowMS(),
+		ID:             s.next("audit"),
+		AdminID:        adminID,
+		Action:         action,
+		TargetType:     targetType,
+		TargetID:       targetID,
+		BeforeJSON:     before,
+		AfterJSON:      after,
+		RequestID:      meta.RequestID,
+		ClientIP:       meta.ClientIP,
+		AgentSessionID: meta.Agent.AgentSessionID,
+		AgentMode:      meta.Agent.AgentMode,
+		ConfirmationID: meta.Agent.ConfirmationID,
+		ConfirmedBy:    meta.Agent.ConfirmedBy,
+		ConfirmedAt:    meta.Agent.ConfirmedAt,
+		CreatedAt:      nowMS(),
 	})
 }
 

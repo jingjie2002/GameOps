@@ -16,6 +16,7 @@ type Config struct {
 	TokenSigningKey  string
 	CoreRankHTTP     string
 	MySQLDSN         string
+	RiskAIProvider   string
 }
 
 func ConfigFromEnv() Config {
@@ -30,6 +31,7 @@ func ConfigFromEnv() Config {
 		TokenSigningKey:  getenv("GAMEOPS_TOKEN_SIGNING_KEY", "gameops-dev-signing-key"),
 		CoreRankHTTP:     trimRightSlash(getenv("CORE_RANK_HTTP", "http://127.0.0.1:8081")),
 		MySQLDSN:         getenv("GAMEOPS_MYSQL_DSN", ""),
+		RiskAIProvider:   getenv("GAMEOPS_RISK_AI_PROVIDER", "mock-ai"),
 	}
 }
 

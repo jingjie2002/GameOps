@@ -24,6 +24,7 @@ type Mail struct {
 	Items     []string `json:"items"`
 	Status    string   `json:"status"`
 	ClaimedAt int64    `json:"claimed_at,omitempty"`
+	ExpiresAt int64    `json:"expires_at"`
 	CreatedBy string   `json:"created_by"`
 	CreatedAt int64    `json:"created_at"`
 }
@@ -33,6 +34,7 @@ type CDKBatch struct {
 	Name           string   `json:"name"`
 	Gold           int64    `json:"gold"`
 	Items          []string `json:"items"`
+	Status         string   `json:"status"`
 	MaxUsesPerCode int      `json:"max_uses_per_code"`
 	ExpiresAt      int64    `json:"expires_at"`
 	CreatedBy      string   `json:"created_by"`
@@ -77,14 +79,56 @@ type GameEvent struct {
 }
 
 type AuditLog struct {
-	ID         string `json:"id"`
-	AdminID    string `json:"admin_id"`
-	Action     string `json:"action"`
-	TargetType string `json:"target_type"`
-	TargetID   string `json:"target_id"`
-	BeforeJSON string `json:"before_json,omitempty"`
-	AfterJSON  string `json:"after_json,omitempty"`
-	RequestID  string `json:"request_id"`
-	ClientIP   string `json:"client_ip"`
-	CreatedAt  int64  `json:"created_at"`
+	ID             string `json:"id"`
+	AdminID        string `json:"admin_id"`
+	Action         string `json:"action"`
+	TargetType     string `json:"target_type"`
+	TargetID       string `json:"target_id"`
+	BeforeJSON     string `json:"before_json,omitempty"`
+	AfterJSON      string `json:"after_json,omitempty"`
+	RequestID      string `json:"request_id"`
+	ClientIP       string `json:"client_ip"`
+	AgentSessionID string `json:"agent_session_id,omitempty"`
+	AgentMode      string `json:"agent_mode,omitempty"`
+	ConfirmationID string `json:"confirmation_id,omitempty"`
+	ConfirmedBy    string `json:"confirmed_by,omitempty"`
+	ConfirmedAt    int64  `json:"confirmed_at,omitempty"`
+	CreatedAt      int64  `json:"created_at"`
+}
+
+type AgentAuditFields struct {
+	AgentSessionID string `json:"agent_session_id,omitempty"`
+	AgentMode      string `json:"agent_mode,omitempty"`
+	ConfirmationID string `json:"confirmation_id,omitempty"`
+	ConfirmedBy    string `json:"confirmed_by,omitempty"`
+	ConfirmedAt    int64  `json:"confirmed_at,omitempty"`
+}
+
+type AuditMeta struct {
+	AdminID   string
+	RequestID string
+	ClientIP  string
+	Agent     AgentAuditFields
+}
+
+type MailDraft struct {
+	PlayerID         string
+	PlayerIDs        []string
+	Title            string
+	Body             string
+	Gold             int64
+	Items            []string
+	ExpiresInSeconds int64
+}
+
+type MailPreview struct {
+	Allowed          bool     `json:"allowed"`
+	RiskLevel        string   `json:"risk_level"`
+	TargetCount      int      `json:"target_count"`
+	Gold             int64    `json:"gold"`
+	Items            []string `json:"items"`
+	ExpiresInSeconds int64    `json:"expires_in_seconds"`
+	ExpiresAt        int64    `json:"expires_at"`
+	Violations       []string `json:"violations"`
+	Warnings         []string `json:"warnings"`
 }
